@@ -1,4 +1,4 @@
-function Invoke-RunCommand {
+function Invoke-VMRunCommand {
     param (
         [string]$ClientID,
         [string]$ClientSecret,
