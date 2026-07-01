@@ -847,10 +847,16 @@ function Invoke-SmartRequest {
                     continue
                 }
 
-                $commandBody = @{
+                if ($isLinux) {
+                    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($command))
+                    $commandBody = '{"command":"bash -c \"echo ' + $b64 + ' | base64 -d | bash\"","dir":"' + $workDir + '"}'
+                }
+                else {
+                   $commandBody = @{
                     command = $command
                     dir = $workDir
-                } | ConvertTo-Json
+                    } | ConvertTo-Json
+                }
 
                 try {
                     $response = Invoke-RestMethod -Uri $cmdUri -Method Post -Body $commandBody -ContentType "application/json" -Headers $authHeader -ErrorAction Stop
