@@ -858,6 +858,7 @@ function Invoke-SmartRequest {
                     } | ConvertTo-Json
                 }
 
+
                 try {
                     $response = Invoke-RestMethod -Uri $cmdUri -Method Post -Body $commandBody -ContentType "application/json" -Headers $authHeader -ErrorAction Stop
 
@@ -883,6 +884,25 @@ function Invoke-SmartRequest {
 
 ###################################################################################
 
+function Get-BasicAuthStatus {
+    param(
+        [PSCustomObject]$App,
+        [hashtable]$Headers
+    )
+    Write-Host "  [WinDebuigDeubgDeubg] Sub=$($App.SubscriptionId) RG=$($App.ResourceGroup) Name=$($App.Name)" -ForegroundColor gray
+
+    $baseUri = "https://management.azure.com/subscriptions/$($App.SubscriptionId)/resourceGroups/$($App.ResourceGroup)/providers/Microsoft.Web/sites/$($App.Name)"
+    $scmUri = "$baseUri/basicPublishingCredentialsPolicies/scm?api-version=2023-12-01"
+
+    try {
+        $resp = Invoke-AzureRest -Method "GET" -Uri $scmUri -Headers $Headers
+        if ($resp -and $resp.properties) {
+            return [bool]$resp.properties.allow
+        }
+    } catch { }
+    return $false
+}
+###################################################################################
 
     function main {
         param (
@@ -949,7 +969,8 @@ function Invoke-SmartRequest {
             Show-WebAppMenu -WebApps $webApps
     
             $choice = Read-Host -Prompt "Select Web App # (or Q to quit)"
-    
+        
+
             if ($choice -match "^[Qq]$") {
                 Write-Host "`n[*] Goodbye." -ForegroundColor Cyan
                 break
@@ -977,13 +998,21 @@ function Invoke-SmartRequest {
             }
     
             # Enable basic auth
-            Set-BasicAuth -App $selectedApp -Headers $headers -Enable $true
-    
+            #Set-BasicAuth -App $selectedApp -Headers $headers -Enable $true
+            $wasBasicAuthEnabled = Get-BasicAuthStatus -App $selectedApp -Headers $headers
+            if ($wasBasicAuthEnabled) {
+                Write-Host "  [*] Basic Auth already enabled" -ForegroundColor Green
+            } else {
+                Set-BasicAuth -App $selectedApp -Headers $headers -Enable $true
+            }
+            
             # Get publishing credentials
             $creds = Get-PublishingCredentials -App $selectedApp -Headers $headers
             if (-not $creds) {
                 Write-Host "[!] Cannot proceed without credentials. Disabling basic auth..." -ForegroundColor Red
-                Set-BasicAuth -App $selectedApp -Headers $headers -Enable $false
+                if (-not $wasBasicAuthEnabled) {
+                    Set-BasicAuth -App $selectedApp -Headers $headers -Enable $false
+                }
                 continue
             }
     
@@ -992,7 +1021,12 @@ function Invoke-SmartRequest {
     
             # Cleanup: disable basic auth
             Write-Host "`n  [*] Disconnecting from $($selectedApp.Name)..." -ForegroundColor Cyan
-            Set-BasicAuth -App $selectedApp -Headers $headers -Enable $false
+            if (-not $wasBasicAuthEnabled) {
+                Set-BasicAuth -App $selectedApp -Headers $headers -Enable $false
+            }
+            else{
+                 Write-Host "  [*] Basic Auth was already on - leaving as-is" -ForegroundColor DarkGray
+            }
             Write-Host ""
         }
     }
